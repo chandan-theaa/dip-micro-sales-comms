@@ -1,9 +1,6 @@
 package com.theaa.dip.sales.comms.service;
 
 import java.math.BigDecimal;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.util.Date;
 import java.util.Optional;
 
 import org.modelmapper.ModelMapper;
@@ -100,14 +97,6 @@ public class SalesCommsService {
 	     	MultiValueMap<String, String> values = new LinkedMultiValueMap<>();
 	        values.add("emv_tag", emv_tag);
 	        values.add("emv_ref", emv_ref);
-	        System.out.println("emailRequest.getQuoteReference()==="+emailRequest.getQuoteReference());
-	        System.out.println("emailRequest.getStartDate())==="+emailRequest.getStartDate());
-	        System.out.println("emailRequest.getProposerEmail()==="+emailRequest.getProposerEmail()); 
-	        System.out.println("emailRequest.getProposerTitle()==="+emailRequest.getProposerTitle()); 
-            System.out.println("emailRequest.getProposerSurname()==="+emailRequest.getProposerSurname());
-            System.out.println("emailRequest.getAnnualPrice().toString()==="+emailRequest.getAnnualPrice().toString());
-            System.out.println("emailRequest.getVehicleRegistration()===="+emailRequest.getVehicleRegistration());
-            System.out.println("eemailRequest.getVoluntaryExcess().toString()===="+emailRequest.getVoluntaryExcess().toString());
 	        values.add("NEW_QUOTE_REF_NO_FIELD", emailRequest.getQuoteReference());
 	        values.add("COVER_START_DATE_FIELD",emailRequest.getStartDate());
 	        values.add("EMAIL_FIELD",emailRequest.getProposerEmail());
@@ -118,17 +107,14 @@ public class SalesCommsService {
 	        values.add("VOLUNTARY_EXCESS_FIELD", emailRequest.getVoluntaryExcess().toString());
 	        return values;
 	    }
-
 	 
-	 public void sendPaymentSuccessMessage(PaymentMessageDTO paymentMessage) {
+	public void sendPaymentSuccessMessage(PaymentMessageDTO paymentMessage) {
 		String quoteReference = paymentMessage.getQuoteReference();
 		Mono<QuoteMessageVO> quoteMessageVO = salesCommsDao.getQuoteDetailsbyQuoteReference(quoteReference);
-		 String value= quoteMessageVO.map(item -> adaptQuoteVOToQuoteDTO(item)).map(item1 -> getEmailRequestDetails(item1))
-				.flatMap(item2 -> sendEmail(item2)).block();
-				//.switchIfEmpty(Mono.error(new RuntimeException("Error in sending email for the quoteReference"+ quoteReference)));
-	   System.out.println("value===="+value);
-		 
-     }
+		 quoteMessageVO.map(item -> adaptQuoteVOToQuoteDTO(item)).map(item1 -> getEmailRequestDetails(item1))
+		.flatMap(item2 -> sendEmail(item2)).filter(i -> i.equalsIgnoreCase("failure"))
+		.subscribe((result)->{},(error)->{throw new RuntimeException(error);});
+	 }
 
 	public EmailRequestDTO getEmailRequestDetails(QuoteMessageDTO item) {
 			String  quoteRef= item.getQuoteReference();
