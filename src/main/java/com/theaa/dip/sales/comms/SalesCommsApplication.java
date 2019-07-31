@@ -8,7 +8,7 @@ import com.theaa.dip.lib.instrument.logging.EnableLogging;
 @EnableLogging
 @SpringCloudApplication
 @EnableConfigurationProperties({
-  CommConfigurationProperties.class, CORSConfigurationProperties.class
+   CORSConfigurationProperties.class
 })
 public class SalesCommsApplication {
     
