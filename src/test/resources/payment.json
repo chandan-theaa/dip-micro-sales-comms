@@ -1,0 +1,14 @@
+{
+	"metaData": {
+		"traceId": "lc4afd50-2709-4e9b-ab04-3f7890c512e1",
+		"namespace": "DIP-SALES.PAYMENT.SUCCESS",
+		"source": "micro-sales-payment",
+		"version": "1.0.0",
+		"messageId": "dc7e94b8-e954-497d-a612-1f8f665f8d2c"
+	},
+	"data": {
+		"quoteReference": "WW5MY190FLLD",
+		"paymentJourney": "MOTOR",
+		"lastUpdated": "2019-07-09T09:55:04.981Z"
+	}
+}

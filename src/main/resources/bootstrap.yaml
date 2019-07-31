@@ -1,0 +1,4 @@
+spring.application.name: micro-sales-comms
+aws.paramstore.profileSeparator: .
+aws.paramstore.prefix: /microservice-config
+clusterId: ${spring.profiles.active}

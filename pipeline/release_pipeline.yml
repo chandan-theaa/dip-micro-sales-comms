@@ -1,0 +1,412 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Dev Pipeline
+Parameters:
+  Platform:
+    Type: String
+    Description: Platform
+    Default: "dip"
+  ServiceName:
+    Type: String
+    Description: Name of Service e.g. Project
+  PipelineBucket:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: Name of bucket to use for the CodePipeline artifacts
+    Default: "/PipelineBucket"
+  CloudformationBucket:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: Name of bucket to use for the Cloudformation artifacts
+    Default: "/CloudformationBucket"
+  SourceBucket:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: "/SourceBucket"
+  GithubOwner:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: Github Owner
+    Default: "/GithubOwner"
+  GithubRepo:
+    Type: String
+    Description: Github Repo
+  GithubUsers:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: Github User
+    Default: "/GithubUsers"
+  DockerUrl:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: /DockerUrl
+  GithubToken:
+    Type: String
+    Description: injected SSM Secure Parameter
+    NoEcho: true
+  BuildImage:
+    Type: String
+    Default: "aws/codebuild/java:openjdk-8"
+  SandboxAccount:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: aa-sandbox
+    Default: "/SandboxAccount"
+  UatAccount:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: aa-uat
+    Default: "/UatAccount"
+  CyclingSecret:
+    Type: String
+    Description: injected secret that should cycle on every deploy
+    NoEcho: true
+  Version:
+    Type: String
+    Description: Release Version   
+Resources:
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Join ["/", ["/aws/pipeline", !Ref "AWS::StackName" ]]
+      RetentionInDays: 30
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${Platform}-${ServiceName}-release
+      LogsConfig:
+        CloudWatchLogs:
+          Status:  ENABLED
+          GroupName:  !Ref BuildLogGroup
+          StreamName:  release 
+      EncryptionKey: !ImportValue PipelineKMS
+      Description: Build artifact from source
+      ServiceRole: !ImportValue CodeBuildRole
+      Cache:
+        Type: S3
+        Location: !Sub ${PipelineBucket}/${Platform}-${ServiceName}/_cache/artifact
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref BuildImage
+        PrivilegedMode: True
+        EnvironmentVariables:
+        - Name: RELEASE
+          Value: !Ref Version
+          Type: PLAINTEXT
+        - Name: CLOUDFORMATION_BUCKET
+          Value: /CloudformationBucket
+          Type: PARAMETER_STORE
+        - Name: REPO_NAME
+          Value: !Ref GithubRepo
+          Type: PLAINTEXT
+        - Name: REPO_URL
+          Value: /DockerUrl
+          Type: PARAMETER_STORE
+        - Name: GITHUB_OWNER
+          Value: /GithubOwner
+          Type: PARAMETER_STORE
+        - Name: GITHUB_USER
+          Value: /GithubUsers
+          Type: PARAMETER_STORE
+        - Name: GITHUB_TOKEN
+          Value: /GithubToken
+          Type: PARAMETER_STORE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo Install Phase `date`
+                - apt-get update && apt-get install -y git
+                - chmod 755 gradlew
+                - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 --storage-driver=overlay&
+                - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+                - $(aws ecr get-login --region ${AWS_REGION} --no-include-email)
+            pre_build:
+              commands:
+                - echo Pre-Build Phase `date`
+                - mkdir gitsource
+                - cd gitsource
+                - git clone https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${REPO_NAME} .
+                - git checkout $CODEBUILD_RESOLVED_SOURCE_VERSION
+                - LAST_TAG=$(git tag --sort=-v:refname | grep ${RELEASE}-RC | head -1)
+                - |
+                  if [ $LAST_TAG ]
+                  then
+                    CANDIDATE="$(echo $LAST_TAG | awk -F'.' '{print $NF}')"
+                  else
+                    CANDIDATE=0
+                  fi
+                - VERSION="${RELEASE}-RC.$((CANDIDATE+1))"
+                - git tag $VERSION
+                - git push --tags
+                - echo version $VERSION
+                - cd ..
+                - aws cloudformation validate-template --template-body file://cloudformation/cloudformation.yml 
+            build:
+              commands:
+                - echo Build Phase `date`
+                - ./gradlew clean build --configure-on-demand
+                - PACKAGE=$(./gradlew printJar -q | tail -n 1)
+                - docker build --build-arg JAR_FILE=build/libs/$PACKAGE -t $REPO_NAME:$VERSION .
+            post_build:
+              commands:
+                - echo Post-Build Phase `date`
+                - docker tag $REPO_NAME:$VERSION $REPO_URL/$REPO_NAME:$VERSION
+                - docker push $REPO_URL/$REPO_NAME:$VERSION
+                - printf '{"Version":"%s"}' $VERSION > Overrides.json
+                - aws s3 cp cloudformation s3://$CLOUDFORMATION_BUCKET/$REPO_NAME/$VERSION/ --recursive --sse aws:kms --sse-kms-key-id ${CODEBUILD_KMS_KEY_ID}
+                - docker save $REPO_NAME:$VERSION | gzip > docker.tar.gz
+          artifacts:
+            secondary-artifacts:
+              Build:
+                files:
+                  - Overrides.json
+                  - docker.tar.gz
+                  - cloudformation/*
+                  - build/libs/*
+                discard-paths: yes
+              Deploy:
+                files:
+                  - Overrides.json
+                  - cloudformation/*
+                discard-paths: yes
+      TimeoutInMinutes: 30
+      VpcConfig:
+        VpcId: !ImportValue VpcId
+        Subnets:
+          - !Select [ 0 , !Split [ ",", !ImportValue PrivateSubnetIds]]
+          - !Select [ 1 , !Split [ ",", !ImportValue PrivateSubnetIds]]
+          - !Select [ 2 , !Split [ ",", !ImportValue PrivateSubnetIds]]
+        SecurityGroupIds: [!ImportValue CodeBuildSecurityGroup]
+      Tags:
+      - Key: Project
+        Value: !Sub ${Platform}-${ServiceName}
+
+
+## RELEASE
+
+  ReleaseWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      AuthenticationConfiguration:
+        SecretToken: !Ref CyclingSecret
+      Filters:
+      - JsonPath: "$.ref"
+        MatchEquals: refs/heads/{Branch}
+      Authentication: GITHUB_HMAC
+      TargetPipeline: !Ref ReleasePipeline
+      TargetAction: Source
+      Name: !Sub ${Platform}-${ServiceName}-release
+      TargetPipelineVersion: !GetAtt ReleasePipeline.Version
+      RegisterWithThirdParty: 'true'
+  ReleasePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !ImportValue CodePipelineRole
+      Name: !Sub ${Platform}-${ServiceName}-release
+      Stages:
+      - Name: Source
+        Actions:
+        - Name: Source
+          InputArtifacts: []
+          OutputArtifacts:
+          - Name: Source
+          ActionTypeId:
+            Category: Source
+            Owner: ThirdParty
+            Version: '1'
+            Provider: GitHub
+          Configuration:
+              Owner: !Ref GithubOwner
+              Repo: !Ref GithubRepo
+              Branch: !Sub "release/${Version}"
+              OAuthToken: !Ref GithubToken 
+          RunOrder: 10
+      - Name: Build
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: Source
+          OutputArtifacts:
+          - Name: Build
+          - Name: Deploy
+          Configuration:
+            ProjectName: !Ref CodeBuild
+          RunOrder: 10
+      - Name: 'ci-release'
+        Actions:
+        - Name: GenerateChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            RoleArn: !ImportValue CloudFormationRole
+            StackName: !Sub ${Platform}-${ServiceName}-ci-release
+            Capabilities: CAPABILITY_IAM
+            TemplateConfiguration: "Deploy::ci-release-config.json" 
+            TemplatePath: "Deploy::cloudformation.yml"
+            ParameterOverrides: !Sub |
+              {
+                "Version" : { "Fn::GetParam" : ["Deploy", "Overrides.json", "Version"]}
+              }
+            ChangeSetName: ci-release
+          InputArtifacts:
+            - Name: Deploy
+          RunOrder: 10
+        - Name: ExecuteChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: ci-release
+            StackName: !Sub ${Platform}-${ServiceName}-ci-release
+          RunOrder: 20
+
+
+      - Name: 'qa-release'
+        Actions:
+        - Name: GenerateChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            RoleArn: !ImportValue CloudFormationRole
+            StackName: !Sub ${Platform}-${ServiceName}-qa-release
+            Capabilities: CAPABILITY_IAM
+            TemplateConfiguration: "Deploy::qa-release-config.json"
+            TemplatePath: "Deploy::cloudformation.yml"
+            ParameterOverrides: !Sub |
+              {
+                "Version" : { "Fn::GetParam" : ["Deploy", "Overrides.json", "Version"]}
+              }
+            ChangeSetName: qa-release
+          InputArtifacts:
+            - Name: Deploy
+          RunOrder: 20
+        - Name: ExecuteChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: qa-release
+            StackName: !Sub ${Platform}-${ServiceName}-qa-release
+          RunOrder: 30
+
+      - Name: 'Signoff'
+        Actions:
+        - Name: Signoff
+          ActionTypeId:
+            Category: Approval
+            Owner: AWS
+            Version: 1
+            Provider: Manual
+          Configuration:
+            NotificationArn: !ImportValue CodePipelineSNSTopic
+            #ExternalEntityLink: ""
+            CustomData: !Sub |
+              A new change was deployed to ${Platform}-${ServiceName}-qa-release stack.
+              Do you approve the changes for UAT?
+          RunOrder: 10
+
+
+      - Name: 'uat-release'
+        Actions:
+        - Name: GenerateChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            RoleArn: !Sub arn:aws:iam::${UatAccount}:role/CloudFormationRole
+            StackName: !Sub ${Platform}-${ServiceName}-uat-release
+            Capabilities: CAPABILITY_IAM
+            TemplateConfiguration: "Deploy::uat-release-config.json"
+            TemplatePath: "Deploy::cloudformation.yml"
+            ParameterOverrides: !Sub |
+              {
+                "Version" : { "Fn::GetParam" : ["Deploy", "Overrides.json", "Version"]}
+              }
+            ChangeSetName: uat-release
+          InputArtifacts:
+            - Name: Deploy
+          RunOrder: 20
+          RoleArn: !Sub arn:aws:iam::${UatAccount}:role/CodePipelineRole
+        - Name: ExecuteChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: uat-release
+            StackName: !Sub ${Platform}-${ServiceName}-uat-release
+          RunOrder: 30
+          RoleArn: !Sub arn:aws:iam::${UatAccount}:role/CodePipelineRole
+ 
+      - Name: Promote
+        Actions:
+        - Name: Signoff
+          ActionTypeId:
+            Category: Approval
+            Owner: AWS
+            Version: 1
+            Provider: Manual
+          Configuration:
+            NotificationArn: !ImportValue CodePipelineSNSTopic
+            #ExternalEntityLink: ""
+            CustomData: !Sub |
+              A new change was deployed to ${Platform}-${ServiceName}-uat-release stack.
+              Do you want to promote to Staging?
+          RunOrder: 10
+        - Name: Promote
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: Build
+          OutputArtifacts: []
+          Configuration:
+            ProjectName:
+              Fn::ImportValue:
+                !Sub ${Platform}-${ServiceName}-promote
+          RunOrder: 20
+      RestartExecutionOnUpdate: true
+      ArtifactStore:
+        Type: S3
+        EncryptionKey:
+          Id: !ImportValue PipelineKMS
+          Type: KMS
+        Location: !Ref PipelineBucket
+
+
+Outputs:
+  PipelineUrl:
+    Value:
+      Fn::Join:
+      - ''
+      - - https://console.aws.amazon.com/codepipeline/home?region=
+        - Ref: AWS::Region
+        - "#/view/"
+        - Ref: ReleasePipeline
+

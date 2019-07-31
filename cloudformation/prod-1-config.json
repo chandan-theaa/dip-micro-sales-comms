@@ -1,0 +1,24 @@
+{
+  "Parameters" : {
+    "Env" : "prod",
+    "EnvId": "1",
+    "Platform": "dip",
+    "ServiceName": "dip-micro-sales-comms"
+  },
+  "Tags" : {
+    "Env" : "prod",
+    "EnvId": "1",
+    "Platform": "dip",
+    "ServiceName": "dip-micro-sales-comms"
+  },
+  "StackPolicy" : {
+    "Statement" : [
+      {
+        "Effect" : "Allow",
+        "NotAction" : "Update:Delete",
+        "Principal": "*",
+        "Resource" : "*"
+      }
+    ]
+  }
+}

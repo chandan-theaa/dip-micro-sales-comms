@@ -1,0 +1,38 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Staging and Prod Docker Repository
+Parameters:
+  Platform:
+    Type: String
+    Description: Platform
+    Default: "dip"
+  ServiceName:
+    Type: String
+    Description: Name of Service e.g. Project
+  PrdAccount:
+    Type: String
+    Description: aa-prd
+    Default: "043432482897"
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Sub ${Platform}-${ServiceName}
+      RepositoryPolicyText: !Sub |
+        {
+          "Version": "2008-10-17",
+          "Statement":[
+            {
+              "Sid":"CrossAccountPull",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS":"arn:aws:iam::${PrdAccount}:root"
+              },
+              "Action":[
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchGetImage",
+                "ecr:BatchCheckLayerAvailability"
+              ]
+            }
+          ]
+        }

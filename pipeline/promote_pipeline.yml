@@ -1,0 +1,78 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Promote Build
+Parameters:
+  Platform:
+    Type: String
+    Description: Platform
+    Default: "dip"
+  ServiceName:
+    Type: String
+    Description: Name of Service e.g. Project
+  GithubRepo:
+    Type: String
+    Description: Github Repo
+  BuildImage:
+    Type: String
+    Default: "aws/codebuild/java:openjdk-8"
+
+
+
+Resources:
+
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Join ["/", ["/aws/pipeline", !Ref "AWS::StackName" ]]
+      RetentionInDays: 30
+ 
+  Promote:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${Platform}-${ServiceName}-promote
+      LogsConfig:
+        CloudWatchLogs:
+          Status:  ENABLED
+          GroupName:  !Ref BuildLogGroup
+          StreamName:  promote
+      EncryptionKey: !ImportValue PipelineKMS
+      Description: Promote Artifacts to Pre-Prod
+      ServiceRole: !ImportValue PromoteRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref BuildImage
+        PrivilegedMode: False
+        EnvironmentVariables:
+        - Name: SOURCE_BUCKET
+          Value: /SourceBucket
+          Type: PARAMETER_STORE
+        - Name: SOURCE_ACCOUNT
+          Value: /PreAccount
+          Type: PARAMETER_STORE
+        - Name: REPO_NAME
+          Value: !Ref GithubRepo
+          Type: PLAINTEXT
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - VERSION=$(cat Overrides.json | python -c "import sys, json; print(json.load(sys.stdin)['Version'])")
+            build:
+              commands:
+                - zip ${REPO_NAME} docker.tar.gz stge-release-config.json prod-1-config.json cloudformation.yml Overrides.json
+                - aws s3api put-object --bucket ${SOURCE_BUCKET} --key ${REPO_NAME} --body ${REPO_NAME}.zip --acl bucket-owner-full-control --metadata codepipeline-artifact-revision-summary=${VERSION} --server-side-encryption aws:kms --ssekms-key-id arn:aws:kms:${AWS_REGION}:${SOURCE_ACCOUNT}:alias/PipelineKMS
+      TimeoutInMinutes: 30
+
+Outputs:
+  Promote:
+    Value: !Ref Promote
+    Export:
+      Name: !Sub ${Platform}-${ServiceName}-promote
+

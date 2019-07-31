@@ -1,0 +1,134 @@
+buildscript {
+	ext {
+		springBootVersion = '2.1.6.RELEASE'
+	}
+	repositories {
+		maven { url "http://aa-rhvm03.theaa.local:18081/nexus/content/groups/public"}
+	}
+	dependencies {
+		classpath("org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}")
+		classpath("org.asciidoctor:asciidoctor-gradle-plugin:1.5.3")
+	}
+}
+
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'io.spring.dependency-management'
+apply plugin: 'org.asciidoctor.convert'
+
+
+sourceCompatibility = 1.8
+
+repositories {
+	maven { url "http://aa-rhvm03.theaa.local:18081/nexus/content/groups/public"}
+	maven { url "https://s3-us-west-2.amazonaws.com/dynamodb-local/release" }
+}
+
+ext {
+	springCloudVersion = 'Greenwich.SR2'
+}
+
+group = 'com.theaa'
+version = '1.0.0-SNAPSHOT'
+
+configurations {
+    all*.exclude module: 'spring-boot-starter-logging'
+}
+
+compileJava {
+    options.compilerArgs << '-parameters'
+}
+
+springBoot {
+	buildInfo{
+		properties {
+			additional = [
+				'revision': 'local'
+			]
+		}
+	}
+}
+
+bootJar {
+	manifest {
+		attributes 'Implementation-Version': version
+	}
+}
+
+dependencies {
+
+	compile("org.springframework.ws:spring-ws-core")
+	compile 'com.theaa.dip:instrument-logging:1.1.+'
+	compile 'com.theaa.dip:instrument-messaging:1.0.+'
+	compile 'org.springframework.boot:spring-boot-starter-webflux'
+	compile 'org.springframework.boot:spring-boot-starter-validation'
+	compile 'org.springframework.boot:spring-boot-starter-actuator'
+	compile 'org.springframework.boot:spring-boot-starter-log4j2'	
+	compile 'org.springframework.boot:spring-boot-starter-data-redis-reactive'
+	compile 'commons-beanutils:commons-beanutils:1.9.3'
+	compile 'org.modelmapper:modelmapper:2.3.5'
+	
+	compile 'org.springframework.cloud:spring-cloud-aws-autoconfigure'
+	compile 'org.springframework.cloud:spring-cloud-aws-messaging'
+	compile 'software.amazon.awssdk:sns:2.5.51'
+	
+	compile 'org.springframework.cloud:spring-cloud-starter-aws-parameter-store-config'
+	compile 'org.springframework.cloud:spring-cloud-starter-netflix-hystrix'
+	compile 'org.springframework.cloud:spring-cloud-starter-sleuth'
+	
+	compile 'software.amazon.awssdk:dynamodb:2.3.2'
+	compile 'com.amazonaws:aws-java-sdk-sns'
+    compile 'com.univocity:univocity-parsers:2.7.6'
+    
+	testCompile 'org.springframework.boot:spring-boot-starter-test'
+	testCompile 'io.projectreactor:reactor-test'
+	testCompile "com.github.tomakehurst:wiremock-standalone:2.18.0"
+	
+	testCompile ("com.amazonaws:DynamoDBLocal:1.11.119") {
+		exclude module: "mockito-core"
+	}
+	
+	testCompile "org.springframework.restdocs:spring-restdocs-webtestclient"
+	asciidoctor "org.springframework.restdocs:spring-restdocs-asciidoctor"
+}
+
+dependencyManagement {
+	imports {
+		mavenBom "org.springframework.cloud:spring-cloud-dependencies:${springCloudVersion}"
+	}
+}
+
+
+task copyNativeDeps(type: Copy) {
+	mkdir "build/native-libs"
+	from(configurations.testCompileClasspath) {
+		include '*.dll'
+		include '*.dylib'
+		include '*.so'
+	}
+	into 'build/native-libs'
+}
+
+ext {
+	snippetsDir = file('build/generated-snippets')
+}
+
+test {
+	dependsOn copyNativeDeps
+	systemProperty "java.library.path", 'build/native-libs'
+	systemProperty "sqlite4java.library.path", 'build/native-libs'
+	testLogging.showStandardStreams = true
+	testLogging.exceptionFormat = 'full'
+	outputs.dir snippetsDir
+}
+
+
+asciidoctor {
+	dependsOn test
+    attributes \
+      'snippets': file(snippetsDir)
+}
+
+task printVersion << { logger.quiet version }
+task printJar << { logger.quiet jar.archiveName }

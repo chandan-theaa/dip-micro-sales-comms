@@ -1,0 +1,255 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Staging and Prod Pipeline
+Parameters:
+  Platform:
+    Type: String
+    Description: Platform
+    Default: "dip"
+  ServiceName:
+    Type: String
+    Description: Name of Service e.g. Project
+  PipelineBucket:
+    Type: String
+    Description: Name of bucket to use for the CodePipeline artifacts
+    Default: "dip-pipeline"
+  LambdaBucket:
+    Type: String
+    Description: Name of bucket to use for the Lambda artifacts
+    Default: "dip-lambda"
+  CloudformationBucket:
+    Type: String
+    Description: Name of bucket to use for the Cloudformation artifacts
+    Default: "dip-cloudformation"
+  SourceBucket:
+    Type: String
+    Description: Name of bucket to use for the Source Artifacts 
+    Default: "dip-source"  
+  DockerUrl:
+    Type: String
+    Description: Prod Docker Repo Url
+    Default: 797497794242.dkr.ecr.eu-west-1.amazonaws.com
+  BuildImage:
+    Type: String
+    Default: "aws/codebuild/java:openjdk-8"
+  PrdAccount:
+    Type: String
+    Description: aa-prd
+    Default: "043432482897"
+Resources:
+
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Join ["/", ["/aws/pipeline", !Ref "AWS::StackName" ]]
+      RetentionInDays: 30
+  Extract:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${Platform}-${ServiceName}-extract
+      LogsConfig:
+        CloudWatchLogs:
+          Status:  ENABLED
+          GroupName:  !Ref BuildLogGroup
+          StreamName:  promote
+      EncryptionKey: !ImportValue PipelineKMS
+      Description: Promote Artifacts to Pre-Prod
+      ServiceRole: !ImportValue CodeBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref BuildImage
+        PrivilegedMode: True
+        EnvironmentVariables:
+        - Name: LAMBDA_BUCKET
+          Value: !Ref LambdaBucket
+          Type: PLAINTEXT
+        - Name: CLOUDFORMATION_BUCKET
+          Value: !Ref CloudformationBucket
+          Type: PLAINTEXT
+        - Name: REPO_NAME
+          Value: !Sub ${Platform}-${ServiceName}
+          Type: PLAINTEXT
+        - Name: REPO_URL
+          Value: !Ref DockerUrl
+          Type: PLAINTEXT
+        # - Name: Name
+        #   Value: /CodeBuild/testParameter
+        #   Type: PARAMETER_STORE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - $(aws ecr get-login --region eu-west-1 --no-include-email)
+                - VERSION=$(cat Overrides.json | python -c "import sys, json; print(json.load(sys.stdin)['Version'])")
+            build:
+              commands:
+                - aws s3 cp ./ s3://${CLOUDFORMATION_BUCKET}/${REPO_NAME}/${VERSION}/ --recursive --exclude "*" --include "stge-release-config.json" --include "prod-1-config.json" --include "Overrides.json" --include "cloudformation.yml"
+                - docker load < docker.tar.gz
+                - docker images
+                - docker tag ${REPO_NAME}:${VERSION} ${REPO_URL}/${REPO_NAME}:${VERSION}
+                - docker push ${REPO_URL}/${REPO_NAME}:${VERSION}
+          artifacts:
+            files:
+              - stge-release-config.json
+              - prod-1-config.json
+              - cloudformation.yml
+              - Overrides.json
+      TimeoutInMinutes: 30
+  ReleasePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !ImportValue CodePipelineRole
+      Name: !Sub ${Platform}-${ServiceName}-release
+      Stages:
+      - Name: Source
+        Actions:
+        - Name: Source
+          InputArtifacts: []
+          OutputArtifacts:
+          - Name: Source
+          ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Version: '1'
+            Provider: S3
+          Configuration:
+              S3Bucket: !Ref SourceBucket
+              S3ObjectKey: !Sub ${Platform}-${ServiceName}
+              PollForSourceChanges: True
+          RunOrder: 10
+      - Name: Extract
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: Source
+          OutputArtifacts:
+          - Name: Deploy
+          Configuration:
+            ProjectName: !Ref Extract
+          RunOrder: 10
+      - Name: 'stge-release'
+        Actions:
+        - Name: Approval
+          ActionTypeId:
+            Category: Approval
+            Owner: AWS
+            Version: 1
+            Provider: Manual
+          Configuration:
+            NotificationArn: !ImportValue CodePipelineSNSTopic
+            #ExternalEntityLink: ""
+            CustomData: !Sub |
+              A new deployment was created for ${Platform}-${ServiceName}-stge-release stack.
+              Do you want to implement the change?
+          RunOrder: 10
+        - Name: GenerateChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            RoleArn: !ImportValue CloudFormationRole
+            StackName: !Sub ${Platform}-${ServiceName}-stge-release
+            Capabilities: CAPABILITY_IAM
+            TemplateConfiguration: "Deploy::stge-release-config.json"
+            TemplatePath: "Deploy::cloudformation.yml"
+            ParameterOverrides: !Sub |
+              {
+                "Version" : { "Fn::GetParam" : ["Deploy", "Overrides.json", "Version"]},
+                "ImageUrl" : "${DockerUrl}"
+              }
+            ChangeSetName: stge-release
+          InputArtifacts:
+            - Name: Deploy
+          RunOrder: 20
+        - Name: ExecuteChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: stge-release
+            StackName: !Sub ${Platform}-${ServiceName}-stge-release
+          RunOrder: 30
+      - Name: 'prod-1'
+        Actions:
+        - Name: Approval
+          ActionTypeId:
+            Category: Approval
+            Owner: AWS
+            Version: 1
+            Provider: Manual
+          Configuration:
+            NotificationArn: !ImportValue CodePipelineSNSTopic
+            #ExternalEntityLink: ""
+            CustomData: !Sub |
+              A new deployment was created for ${Platform}-${ServiceName}-prod-1 stack.
+              Do you want to implement the change?
+          RunOrder: 10
+        - Name: GenerateChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_REPLACE
+            RoleArn: !Sub arn:aws:iam::${PrdAccount}:role/CloudFormationRole
+            StackName: !Sub ${Platform}-${ServiceName}-prod-1
+            Capabilities: CAPABILITY_IAM
+            TemplateConfiguration: "Deploy::prod-1-config.json"
+            TemplatePath: "Deploy::cloudformation.yml"
+            ParameterOverrides: !Sub |
+              {
+                "Version" : { "Fn::GetParam" : ["Deploy", "Overrides.json", "Version"]},
+                "ImageUrl" : "${DockerUrl}"
+              }
+            ChangeSetName: prod-1
+          InputArtifacts:
+            - Name: Deploy
+          RunOrder: 20
+          RoleArn: !Sub arn:aws:iam::${PrdAccount}:role/CodePipelineRole
+        - Name: ExecuteChangeSet
+          ActionTypeId:
+            Owner: AWS
+            Category: Deploy
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            ActionMode: CHANGE_SET_EXECUTE
+            ChangeSetName: prod-1
+            StackName: !Sub ${Platform}-${ServiceName}-prod-1
+          RunOrder: 30
+          RoleArn: !Sub arn:aws:iam::${PrdAccount}:role/CodePipelineRole
+      ArtifactStore:
+        Type: S3
+        EncryptionKey:
+          Id: !ImportValue PipelineKMS
+          Type: KMS
+        Location: !Ref PipelineBucket
+Outputs:
+  PipelineUrl:
+    Value:
+      Fn::Join:
+      - ''
+      - - https://console.aws.amazon.com/codepipeline/home?region=
+        - Ref: AWS::Region
+        - "#/view/"
+        - Ref: ReleasePipeline
+

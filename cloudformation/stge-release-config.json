@@ -1,0 +1,24 @@
+{
+  "Parameters" : {
+    "Env" : "stge",
+    "EnvId": "release",
+    "Platform": "dip",
+    "ServiceName": "dip-micro-sales-comms"
+  },
+  "Tags" : {
+    "Env" : "stge",
+    "EnvId": "release",
+    "Platform": "dip",
+    "ServiceName": "dip-micro-sales-comms"
+  },
+  "StackPolicy" : {
+    "Statement" : [
+      {
+        "Effect" : "Allow",
+        "NotAction" : "Update:Delete",
+        "Principal": "*",
+        "Resource" : "*"
+      }
+    ]
+  }
+}

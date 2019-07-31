@@ -1,0 +1,34 @@
+spring:
+  main:
+    web-application-type: REACTIVE
+
+management:
+  server.port: 0
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+  security.enabled: false
+eureka:
+  client:
+    enabled: false
+service:
+  corsOrigins:
+    - http://localhost:4200
+  corsHeaders:
+    - Content-Type
+  corsMethods:
+    - POST
+    
+    
+dip-micro-sales-comms:
+  email:
+    baseUrl: http://trc.emv2.com:80/
+    URI: D2UTF8
+    emv_tag: 388404000362B6CB
+    emv_ref: BdX7Cqkmjb_ywhgFBJJ768rXK0p4bquwiAz4
+    subject: The AA - Membership Communication
+    from: noreply@theaa.com
+    replyTo: customersupport@theaa.com
+  dynamodb:
+    ttl: 30
